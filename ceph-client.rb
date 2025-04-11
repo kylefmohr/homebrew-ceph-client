@@ -102,8 +102,7 @@ class CephClient < Formula
         system pip_exe, "install", ".", \
                "--prefix=#{venv_root}", \
                "--no-deps",             # Don't install dependencies, rely on formula deps
-               "--no-build-isolation",  # Use current environment, don't build in isolation
-               "--no-user-cfg"          # Ignore user configuration
+               "--no-build-isolation"  # Use current environment, don't build in isolation
       end
     end
 
