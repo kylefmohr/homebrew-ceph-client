@@ -95,14 +95,36 @@ class CephClient < Formula
     py_site_packages = venv_root/"lib/python#{xy}/site-packages"
     ENV.prepend_create_path "PYTHONPATH", py_site_packages
 
-    # Install resources using pip
+    # Install resources using pip into the vendor directory
     resources.each do |r|
       r.stage do
-        # Use pip install with --prefix to install into our target dir
-        system pip_exe, "install", ".", \
-               "--prefix=#{venv_root}", \
-               "--no-deps",             # Don't install dependencies, rely on formula deps
-               "--no-build-isolation"  # Use current environment, don't build in isolation
+        # Pathname object for the directory where the resource was staged
+        staged_dir = Pathname.pwd
+        # Source path to install from. Default to current dir.
+        source_path = staged_dir
+
+        # Check if setup.py/pyproject.toml is *not* in the current dir
+        unless (staged_dir/"setup.py").exist? || (staged_dir/"pyproject.toml").exist?
+          # If not found, assume it's inside a single subdirectory
+          subdirs = staged_dir.children.select(&:directory?)
+          if subdirs.length == 1
+            # If exactly one subdir exists, assume that's the source root
+            source_path = subdirs.first
+            ohai "Resource #{r.name}: setup file not in root, found source dir #{source_path.basename}"
+          else
+            # If no setup file in root AND not exactly one subdir, raise error
+            raise "Could not find setup.py/pyproject.toml in #{staged_dir} or a unique subdirectory for resource #{r.name}"
+          end
+        end
+
+        ohai "Installing resource #{r.name} from #{source_path} into #{py_site_packages}"
+
+        # Use pip install with --target to install directly into site-packages
+        # --target is often simpler for vendoring libraries than --prefix
+        system pip_exe, "install", source_path.to_s, \
+               "--target=#{py_site_packages}", \
+               "--no-deps", \
+               "--no-build-isolation"
       end
     end
 
