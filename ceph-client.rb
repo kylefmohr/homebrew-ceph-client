@@ -83,15 +83,30 @@ class CephClient < Formula
     python_prefix = Formula["python@3.11"].opt_frameworks/"Python.framework/Versions/3.11"
     xy = Language::Python.major_minor_version python_exe
 
+    # --- Python Setup ---
+    python = Formula["python@3.11"]
+    python_exe = python.opt_bin/"python3.11"
+    pip_exe = python.opt_bin/"pip3.11" # Get path to pip for the correct python
+    python_prefix = python.opt_frameworks/"Python.framework/Versions/3.11"
+    xy = Language::Python.major_minor_version python_exe
+
     # Install Python dependencies into libexec/vendor
     venv_root = libexec/"vendor"
     py_site_packages = venv_root/"lib/python#{xy}/site-packages"
     ENV.prepend_create_path "PYTHONPATH", py_site_packages
+
+    # Install resources using pip
     resources.each do |r|
       r.stage do
-        system python_exe, *Language::Python.setup_install_args(venv_root)
+        # Use pip install with --prefix to install into our target dir
+        system pip_exe, "install", ".", \
+               "--prefix=#{venv_root}", \
+               "--no-deps",             # Don't install dependencies, rely on formula deps
+               "--no-build-isolation",  # Use current environment, don't build in isolation
+               "--no-user-cfg"          # Ignore user configuration
       end
     end
+
     # Ensure cython from dependency is used if needed later
     ENV.prepend_path "PATH", Formula["cython"].opt_libexec/"bin"
 
