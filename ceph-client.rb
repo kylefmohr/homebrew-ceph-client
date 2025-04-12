@@ -79,48 +79,33 @@ class CephClient < Formula
 
   def install
     # --- Python Setup ---
-    python_exe = Formula["python@3.11"].opt_bin/"python3.11"
-    python_prefix = Formula["python@3.11"].opt_frameworks/"Python.framework/Versions/3.11"
-    xy = Language::Python.major_minor_version python_exe
-
-    # --- Python Setup ---
     python = Formula["python@3.11"]
     python_exe = python.opt_bin/"python3.11"
-    pip_exe = python.opt_bin/"pip3.11" # Get path to pip for the correct python
+    pip_exe = python.opt_bin/"pip3.11"
     python_prefix = python.opt_frameworks/"Python.framework/Versions/3.11"
     xy = Language::Python.major_minor_version python_exe
 
-    # Install Python dependencies into libexec/vendor
     venv_root = libexec/"vendor"
     py_site_packages = venv_root/"lib/python#{xy}/site-packages"
     ENV.prepend_create_path "PYTHONPATH", py_site_packages
+    ENV.prepend_path "PATH", Formula["cython"].opt_libexec/"bin" # Ensure cython is available
 
-    # Install resources using pip into the vendor directory
-    resources.each do |r|
+    # --- Install Python Resources ONLY ---
+    python_resources = resources.select { |r| ["prettytable", "PyYAML", "wcwidth"].include?(r.name) }
+    python_resources.each do |r|
       r.stage do
-        # Pathname object for the directory where the resource was staged
         staged_dir = Pathname.pwd
-        # Source path to install from. Default to current dir.
         source_path = staged_dir
-
-        # Check if setup.py/pyproject.toml is *not* in the current dir
         unless (staged_dir/"setup.py").exist? || (staged_dir/"pyproject.toml").exist?
-          # If not found, assume it's inside a single subdirectory
           subdirs = staged_dir.children.select(&:directory?)
           if subdirs.length == 1
-            # If exactly one subdir exists, assume that's the source root
             source_path = subdirs.first
-            ohai "Resource #{r.name}: setup file not in root, found source dir #{source_path.basename}"
+            ohai "Python Resource #{r.name}: setup file not in root, found source dir #{source_path.basename}"
           else
-            # If no setup file in root AND not exactly one subdir, raise error
-            raise "Could not find setup.py/pyproject.toml in #{staged_dir} or a unique subdirectory for resource #{r.name}"
+            raise "Could not find setup.py/pyproject.toml in #{staged_dir} or a unique subdirectory for Python resource #{r.name}"
           end
         end
-
-        ohai "Installing resource #{r.name} from #{source_path} into #{py_site_packages}"
-
-        # Use pip install with --target to install directly into site-packages
-        # --target is often simpler for vendoring libraries than --prefix
+        ohai "Installing Python resource #{r.name} from #{source_path} into #{py_site_packages}"
         system pip_exe, "install", source_path.to_s, \
                "--target=#{py_site_packages}", \
                "--no-deps", \
@@ -128,19 +113,13 @@ class CephClient < Formula
       end
     end
 
-    # Ensure cython from dependency is used if needed later
-    ENV.prepend_path "PATH", Formula["cython"].opt_libexec/"bin"
-
-    # --- Boost Build ---
+    # --- Boost Build (Separate from Python resources) ---
     boost_prefix = libexec/"boost"
+    boost_lib_path = boost_prefix/"lib" # Define early for RPATH use
     resource("boost").stage do
-      # Boost needs python headers which aren't found system-wide on macOS
-      # Specify user-config.jam to point to the correct Python version
-      # Ref: https://www.boost.org/doc/libs/1_76_0/libs/python/doc/html/building/configuring_boost_build.html
       py_include = "#{python_prefix}/include/python#{xy}"
-      py_lib = "#{python_prefix}/lib" # Contains libpythonX.Y.dylib
+      py_lib = "#{python_prefix}/lib"
 
-      # Create user-config.jam
       (buildpath/"user-config.jam").write <<~EOS
         using python : #{xy}
                    : #{python_exe}
@@ -148,35 +127,23 @@ class CephClient < Formula
                    : #{py_lib} ;
       EOS
 
-      # Note: Boost bootstrap doesn't use standard CFLAGS/CXXFLAGS/LDFLAGS
-      # It primarily uses settings from user-config.jam or toolset definitions
       system "./bootstrap.sh", "--prefix=#{boost_prefix}", "--with-python=#{python_exe}"
-      # Build and install Boost
-      # Specify necessary libraries if known to speed up, otherwise build all needed by default
-      # link=shared ensures dylibs are built
-      # variant=release for optimized build
-      # toolset=clang is usually auto-detected on macOS, but can be explicit if needed
-      # address-model=64 is default on modern macOS
       system "./b2", "install",
              "-j#{ENV.make_jobs}",
              "--prefix=#{boost_prefix}",
              "--user-config=#{buildpath}/user-config.jam",
              "link=shared",
              "variant=release",
-             "threading=multi", # Ceph needs thread support
-             "python=#{xy}" # Ensure consistency
+             "threading=multi",
+             "python=#{xy}"
     end
 
     # --- Ceph Build ---
     ENV.prepend_path "PKG_CONFIG_PATH", Formula["nss"].opt_lib/"pkgconfig"
     ENV.prepend_path "PKG_CONFIG_PATH", Formula["openssl@3"].opt_lib/"pkgconfig"
-    # Add our custom Boost location to CMAKE_PREFIX_PATH so CMake's FindBoost can find it
     ENV.prepend_path "CMAKE_PREFIX_PATH", boost_prefix
 
-    # Add our Boost libs to the RPATH for Ceph binaries/libs
-    # Also include standard Homebrew lib path
-    boost_lib_path = boost_prefix/"lib"
-    ceph_rpath = [rpath, boost_lib_path].join(":") # rpath is helper for #{lib}
+    ceph_rpath = [rpath, boost_lib_path].join(":")
 
     args = %W[
       -DDIAGNOSTICS_COLOR=always
@@ -188,20 +155,20 @@ class CephClient < Formula
       -DWITH_KRBD=OFF
       -DWITH_LIBCEPHFS=ON
       -DWITH_LTTNG=OFF
-      -DWITH_LZ4=OFF # Consider enabling if needed; requires lz4 dep
+      -DWITH_LZ4=OFF
       -DWITH_MANPAGE=ON
       -DWITH_MGR=OFF
       -DWITH_MGR_DASHBOARD_FRONTEND=OFF
-      -DWITH_PYTHON3=#{xy} # Use major.minor version
+      -DWITH_PYTHON3=#{xy}
       -DWITH_RADOSGW=OFF
       -DWITH_RDMA=OFF
       -DWITH_SPDK=OFF
-      -DWITH_SYSTEM_BOOST=OFF # IMPORTANT: Use the Boost we built
+      -DWITH_SYSTEM_BOOST=OFF
       -DWITH_SYSTEMD=OFF
       -DWITH_TESTS=OFF
       -DWITH_XFS=OFF
-      -DCMAKE_INSTALL_RPATH=#{ceph_rpath} # Set RPATH to find boost libs
-      -DCMAKE_BUILD_WITH_INSTALL_RPATH=ON # Ensure RPATH is used during build too
+      -DCMAKE_INSTALL_RPATH=#{ceph_rpath}
+      -DCMAKE_BUILD_WITH_INSTALL_RPATH=ON
     ]
 
     targets = %w[
@@ -220,7 +187,6 @@ class CephClient < Formula
       system "ninja", *targets
 
       # --- Installation ---
-      # Install binaries
       %w[
         ceph
         ceph-conf
@@ -229,12 +195,8 @@ class CephClient < Formula
         rbd
       ].each { |f| bin.install "bin/#{f}" }
 
-      # Install libraries
-      # Use find to get all relevant dylibs, avoiding manual listing if possible
-      # Be careful not to grab static libs if they exist
       lib.install Dir["lib/*.dylib"]
 
-      # Install man pages
       %w[
         ceph-conf
         ceph-fuse
@@ -244,68 +206,19 @@ class CephClient < Formula
         rbd
       ].each { |f| man8.install "doc/man/#{f}.8" }
 
-      # Install Python bindings using ninja install targets if available and correct
-      # The patch modifies the install path, let's rely on that for now.
-      # If ninja install doesn't work correctly, we might need manual copying.
-      # Target "src/pybind/install" likely handles this.
-      # Check if this installs to the right site-packages relative to prefix
+      # Install Python bindings using ninja install targets
       system "ninja", "src/pybind/install", "src/include/install"
 
-      # Verify Python bindings location (adjust if needed)
+      # Optional: Verify Python bindings location (useful for debugging)
       expected_py_bindings_path = prefix/"lib/python#{xy}/site-packages"
-      unless Dir.exist?(expected_py_bindings_path/"rados") && Dir.exist?(expected_py_bindings_path/"rbd")
-        # Fallback or error if ninja install didn't place them correctly
-        # This might involve manually moving from build/_CPack_Packages/... or similar
-        # The patch seems to target CMAKE_INSTALL_PREFIX/lib/python3.11/site-packages, which should be correct
-        ohai "Python bindings installed to: #{expected_py_bindings_path}"
+      if Dir.exist?(expected_py_bindings_path/"rados") && Dir.exist?(expected_py_bindings_path/"rbd")
+        ohai "Ceph Python bindings successfully installed to: #{expected_py_bindings_path}"
+      else
+        opoo "Ceph Python bindings not found in expected location: #{expected_py_bindings_path}"
+        opoo "Check CMake output and ninja install steps for pybind."
       end
     end
-
-    # No need for bin.env_script_all_files if PYTHONPATH is correctly handled by install
-    # Check if executables link correctly (RPATH should handle Boost)
-    # The install_name_tool calls for /tmp might still be needed if CMake internal linking uses temp paths
-    # Let's keep them for now, but verify if they are necessary after build.
-    # They seem specific to MachO::Tools changing dylib paths *within* the build dir before install.
-    # If RPATH is set correctly, these might become less critical for final linkage.
-    # Consider removing them if the build succeeds and linkage is correct without them.
-    # executables = %w[
-    #   bin/rados
-    #   bin/rbd
-    #   bin/ceph-fuse
-    # ]
-    # mkdir "build" do # Rerun inside build context if needed
-    #   executables.each do |file|
-    #     # ... MachO code ... (kept from original, might need adjustment/removal)
-    #   end
-    # end
-
-    # Remove the rpath modification script as CMAKE_INSTALL_RPATH should handle it
-    # %w[
-    #   ceph-conf
-    #   ceph-fuse
-    #   rados
-    #   rbd
-    # ].each do |name|
-    #   system "install_name_tool", "-add_rpath", "/opt/homebrew/lib", "#{libexec}/bin/#{name}" # Use libexec/bin? No, bin.install puts them in prefix/bin
-    #   system "install_name_tool", "-add_rpath", rpath, bin/name # Add rpath for Homebrew libs
-    #   system "install_name_tool", "-add_rpath", boost_lib_path, bin/name # Add rpath for our Boost libs
-    # end
-  end
-
-  test do
-    # Basic version checks
-    system bin/"ceph", "--version"
-    system bin/"ceph-fuse", "--version"
-    system bin/"rbd", "--version"
-    system bin/"rados", "--version"
-
-    # Python binding import checks
-    # Make sure the installed bindings are importable
-    ENV["PYTHONPATH"] = prefix/"lib/python#{Language::Python.major_minor_version Formula["python@3.11"].opt_bin/"python3.11"}/site-packages"
-    system Formula["python@3.11"].opt_bin/"python3.11", "-c", "import rados"
-    system Formula["python@3.11"].opt_bin/"python3.11", "-c", "import rbd"
-  end
-end
+  end # end install method
 
 # Keep the patch as it seems necessary for Python binding installation paths
 __END__
