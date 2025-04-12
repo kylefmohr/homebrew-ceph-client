@@ -219,6 +219,7 @@ class CephClient < Formula
       end
     end
   end # end install method
+end # end CephClient class
 
 # Keep the patch as it seems necessary for Python binding installation paths
 __END__
@@ -256,5 +257,3 @@ index 9d66ae979a6..eabf22bf174 100644
     if(DEFINED ENV{DESTDIR})
       if(EXISTS /etc/debian_version)
         list(APPEND options --install-layout=deb)
-
-end # end CephClient class
