@@ -54,7 +54,7 @@ class CephClient < Formula
     sha256 "c4d647b99872929fdb7bdcaa4fbe7f01413ed3d98077df798530e5b04f116c83"
   end
 
-  patch :DATA
+  # Don't use a patch - we'll directly modify the file during install
 
   def caveats
     <<~EOS
@@ -89,6 +89,30 @@ class CephClient < Formula
     py_site_packages = venv_root/"lib/python#{xy}/site-packages"
     ENV.prepend_create_path "PYTHONPATH", py_site_packages
     ENV.prepend_path "PATH", Formula["cython"].opt_libexec/"bin" # Ensure cython is available
+
+    # --- Modify Distutils.cmake to fix Python bindings on macOS ---
+    # Create a custom patch file that works with the current Ceph version
+    distutils_file = "cmake/modules/Distutils.cmake"
+    if File.exist?(distutils_file)
+      ohai "Creating and applying custom patch for Distutils.cmake"
+      
+      # Read the Distutils.cmake file contents
+      distutils_content = File.read(distutils_file)
+      
+      # Create a patched version that works on macOS
+      patched_content = distutils_content.gsub(/\s+CC="\${PY_CC}"/, "")
+                                        .gsub(/\s+LDSHARED="\${PY_LDSHARED}"/, "")
+                                        .gsub(/set\(ENV\{CC\} "\${PY_CC}"\)/, "")
+                                        .gsub(/set\(ENV\{LDSHARED\} "\${PY_LDSHARED}"\)/, "")
+                                        .gsub(/set\(options --prefix=\${CMAKE_INSTALL_PREFIX}\)/, 
+                                             'set(options --prefix=${CMAKE_INSTALL_PREFIX} --install-lib=${CMAKE_INSTALL_PREFIX}/lib/python3.11/site-packages)')
+      
+      # Write the patched file back
+      File.write(distutils_file, patched_content)
+      ohai "Successfully patched #{distutils_file} for macOS compatibility"
+    else
+      opoo "#{distutils_file} not found, Python bindings may not be installed correctly"
+    end
 
     # --- Install Python Resources ONLY ---
     python_resources = resources.select { |r| ["prettytable", "PyYAML", "wcwidth"].include?(r.name) }
@@ -220,40 +244,3 @@ class CephClient < Formula
     end
   end # end install method
 end # end CephClient class
-
-# Keep the patch as it seems necessary for Python binding installation paths
-__END__
-diff --git a/cmake/modules/Distutils.cmake b/cmake/modules/Distutils.cmake
-index 9d66ae979a6..eabf22bf174 100644
---- a/cmake/modules/Distutils.cmake
-+++ b/cmake/modules/Distutils.cmake
-@@ -93,11 +93,9 @@ function(distutils_add_cython_module target name src)
-    OUTPUT ${output_dir}/${name}${ext_suffix}
-    COMMAND
-    env
--    CC="${PY_CC}"
-    CFLAGS="${PY_CFLAGS}"
-    CPPFLAGS="${PY_CPPFLAGS}"
-    CXX="${PY_CXX}"
--    LDSHARED="${PY_LDSHARED}"
-    OPT=\"-DNDEBUG -g -fwrapv -O2 -w\"
-    LDFLAGS=-L${CMAKE_LIBRARY_OUTPUT_DIRECTORY}
-    CYTHON_BUILD_DIR=${CMAKE_CURRENT_BINARY_DIR}
-@@ -125,8 +123,6 @@ function(distutils_install_cython_module name)
-    set(maybe_verbose --verbose)
-  endif()
-  install(CODE "
--    set(ENV{CC} \"${PY_CC}\")
--    set(ENV{LDSHARED} \"${PY_LDSHARED}\")
-    set(ENV{CPPFLAGS} \"-iquote${CMAKE_SOURCE_DIR}/src/include
-                        -D'void0=dead_function\(void\)' \
-                        -D'__Pyx_check_single_interpreter\(ARG\)=ARG\#\#0' \
-@@ -135,7 +131,7 @@ function(distutils_install_cython_module name)
-    set(ENV{CYTHON_BUILD_DIR} \"${CMAKE_CURRENT_BINARY_DIR}\")
-    set(ENV{CEPH_LIBDIR} \"${CMAKE_LIBRARY_OUTPUT_DIRECTORY}\")
-
--    set(options --prefix=${CMAKE_INSTALL_PREFIX})
-+    set(options --prefix=${CMAKE_INSTALL_PREFIX} --install-lib=${CMAKE_INSTALL_PREFIX}/lib/python3.11/site-packages)
-    if(DEFINED ENV{DESTDIR})
-      if(EXISTS /etc/debian_version)
-        list(APPEND options --install-layout=deb)
